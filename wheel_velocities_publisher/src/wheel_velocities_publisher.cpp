@@ -41,7 +41,7 @@ private:
         {{-1.0, +1.0, +1.0, -1.0}, "Turn counter-clockwise"},
         {{0.0, 0.0, 0.0, 0.0}, "Stop"}};
 
-    for (const auto& velocities : wheel_velocities_list) {
+    for (const auto &velocities : wheel_velocities_list) {
       publish_speed(velocities.first, velocities.second);
     }
   }
@@ -49,7 +49,7 @@ private:
 
 int main(int argc, char *argv[]) {
   rclcpp::init(argc, argv);
-  std::shared_ptr<WheelVelocitiesPublisher> wheel_velocities_publisher = std::make_shared<WheelVelocitiesPublisher>();
+  rclcpp::spin(std::make_shared<WheelVelocitiesPublisher>());
   rclcpp::shutdown();
   return 0;
 }
