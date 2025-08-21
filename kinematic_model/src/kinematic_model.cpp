@@ -1,5 +1,5 @@
-#include "geometry_msgs/msg/twist.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "geometry_msgs/msg/twist.hpp"
 #include "std_msgs/msg/float32_multi_array.hpp"
 #include <array>
 #include <vector>
@@ -9,7 +9,7 @@ using Float32MultiArray = std_msgs::msg::Float32MultiArray;
 using Twist = geometry_msgs::msg::Twist;
 
 constexpr float l = 0.085;
-constexpr float w = 0.26969;
+constexpr float w = 0.134845;
 constexpr float r = 0.05;
 constexpr float c_wz = r / (4.0f * (l + w));
 constexpr float c_v = r / 4.0f;
@@ -27,7 +27,7 @@ private:
   rclcpp::Subscription<Float32MultiArray>::SharedPtr wheel_speed_subscriber_;
   rclcpp::Publisher<Twist>::SharedPtr cmd_vel_publisher_;
 
-  void wheel_speed_callback(const std_msgs::msg::Float32MultiArray::SharedPtr msg) {
+  void wheel_speed_callback(const Float32MultiArray::SharedPtr msg) {
     if (msg->data.size() != 4) {
       RCLCPP_WARN(get_logger(), "Expected 4 wheel speeds, got %zu", msg->data.size());
       return;

@@ -5,6 +5,10 @@
 using namespace std::chrono_literals;
 using Float32MultiArray = std_msgs::msg::Float32MultiArray;
 
+constexpr float l = 0.085;
+constexpr float w = 0.134845;
+constexpr float r = 0.05;
+
 class WheelVelocitiesPublisher : public rclcpp::Node {
 public:
   WheelVelocitiesPublisher() : Node("wheel_velocities_publisher") {
