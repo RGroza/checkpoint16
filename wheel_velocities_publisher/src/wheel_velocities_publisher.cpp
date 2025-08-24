@@ -37,12 +37,12 @@ private:
 
   void publish_wheel_velocities() {
     std::vector<std::pair<std::vector<float>, std::string>> wheel_velocities_list = {
-        {{+1.0, +1.0, +1.0, +1.0}, "Move forward"},
-        {{-1.0, -1.0, -1.0, -1.0}, "Move backward"},
-        {{-1.0, +1.0, -1.0, +1.0}, "Move left"},
-        {{+1.0, -1.0, +1.0, -1.0}, "Move right"},
-        {{+1.0, -1.0, -1.0, +1.0}, "Turn clockwise"},
-        {{-1.0, +1.0, +1.0, -1.0}, "Turn counter-clockwise"},
+        {{+5.0, +5.0, +5.0, +5.0}, "Move forward"},
+        {{-5.0, -5.0, -5.0, -5.0}, "Move backward"},
+        {{-5.0, +5.0, -5.0, +5.0}, "Move left"},
+        {{+5.0, -5.0, +5.0, -5.0}, "Move right"},
+        {{+5.0, -5.0, -5.0, +5.0}, "Turn clockwise"},
+        {{-5.0, +5.0, +5.0, -5.0}, "Turn counter-clockwise"},
         {{0.0, 0.0, 0.0, 0.0}, "Stop"}};
 
     for (const auto &velocities : wheel_velocities_list) {

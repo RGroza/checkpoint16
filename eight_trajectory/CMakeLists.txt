@@ -10,6 +10,7 @@ find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -19,7 +20,7 @@ if(BUILD_TESTING)
 endif()
 
 add_executable(eight_trajectory src/eight_trajectory.cpp)
-ament_target_dependencies(eight_trajectory rclcpp std_msgs nav_msgs geometry_msgs)
+ament_target_dependencies(eight_trajectory rclcpp std_msgs nav_msgs geometry_msgs tf2_ros)
 
 install(TARGETS
 	eight_trajectory

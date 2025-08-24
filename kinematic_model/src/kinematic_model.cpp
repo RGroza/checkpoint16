@@ -1,5 +1,5 @@
-#include "rclcpp/rclcpp.hpp"
 #include "geometry_msgs/msg/twist.hpp"
+#include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/float32_multi_array.hpp"
 #include <array>
 #include <vector>
@@ -33,12 +33,20 @@ private:
       return;
     }
 
-    const auto& u = msg->data;
+    const auto &u = msg->data;
+
+    float v[3];
+    v[0] = c_wz * (-u[0] + u[1] + u[2] - u[3]);
+    v[1] = c_v * (u[0] + u[1] + u[2] + u[3]);
+    v[2] = c_v * (-u[0] + u[1] - u[2] + u[3]);
+
+    // RCLCPP_INFO(get_logger(), "u: [%.2f, %.2f, %.2f, %.2f] --> v: [%.2f, %.2f, %.2f]", u[0], u[1], u[2], u[3], v[0],
+    //             v[1], v[2]);
 
     Twist twist_message = Twist();
-    twist_message.angular.z = c_wz * (-u[0] + u[1] + u[2] - u[3]);
-    twist_message.linear.x = c_v * (u[0] + u[1] + u[2] + u[3]);
-    twist_message.linear.y = c_v * (-u[0] + u[1] - u[2] + u[3]);
+    twist_message.angular.z = v[0];
+    twist_message.linear.x = v[1];
+    twist_message.linear.y = v[2];
 
     cmd_vel_publisher_->publish(twist_message);
   }
