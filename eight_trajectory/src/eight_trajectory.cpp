@@ -50,14 +50,14 @@ public:
     y_ = y;
   }
 
-  OdomPose operator+(const OdomPose &other_pose) {
-    return OdomPose(x_ + other_pose.x_, y_ + other_pose.y_, phi_ + other_pose.phi_);
+  OdomPose operator+(const OdomPose &p) const {
+    return OdomPose(phi_ + p.phi_, x_ + p.x_, y_ + p.y_);
   }
 
-  OdomPose &operator+=(const OdomPose &other_pose) {
-    x_ += other_pose.x_;
-    y_ += other_pose.y_;
-    phi_ += other_pose.phi_;
+  OdomPose &operator+=(const OdomPose &p) {
+    phi_ += p.phi_;
+    x_ += p.x_;
+    y_ += p.y_;
     return *this;
   }
 
@@ -68,11 +68,23 @@ public:
     phi_ = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
   }
 
-  float delta_x(const OdomPose &goal_pose) const { return goal_pose.x_ - x_; }
+  float error_x(const OdomPose &goal) const {
+    const float ex = goal.x_ - x_;
+    const float ey = goal.y_ - y_;
+    const float c = std::cos(phi_);
+    const float s = std::sin(phi_);
+    return  c*ex + s*ey;
+  }
 
-  float delta_y(const OdomPose &goal_pose) const { return goal_pose.y_ - y_; }
+  float error_y(const OdomPose &goal) const {
+    const float ex = goal.x_ - x_;
+    const float ey = goal.y_ - y_;
+    const float c = std::cos(phi_);
+    const float s = std::sin(phi_);
+    return -s*ex + c*ey;
+  }
 
-  float delta_phi(const OdomPose &goal_pose) const {
+  float error_phi(const OdomPose &goal_pose) const {
     float d = goal_pose.phi_ - phi_;
     if (d > M_PI)
       d -= 2 * M_PI;
@@ -82,13 +94,9 @@ public:
   }
 
   bool goal_reached(const OdomPose &goal_pose) const {
-    return (std::fabs(delta_phi(goal_pose)) < min_phi_error_ &&
-            std::hypot(delta_x(goal_pose), delta_y(goal_pose)) < min_xy_error_);
+    return (std::fabs(error_phi(goal_pose)) < min_phi_error_ &&
+            std::hypot(error_x(goal_pose), error_y(goal_pose)) < min_xy_error_);
   }
-
-  float sin() { return std::sin(phi_); }
-
-  float cos() { return std::cos(phi_); }
 
   std::string to_string() const {
     std::ostringstream oss;
@@ -97,17 +105,17 @@ public:
     return oss.str();
   }
 
-  std::string delta_to_string(const OdomPose &goal_pose) const {
+  std::string error_to_string(const OdomPose &goal_pose) const {
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(2);
-    oss << "{phi: " << delta_phi(goal_pose) << ", x: " << delta_x(goal_pose) << ", y: " << delta_y(goal_pose) << "}";
+    oss << "{phi: " << error_phi(goal_pose) << ", x: " << error_x(goal_pose) << ", y: " << error_y(goal_pose) << "}";
     return oss.str();
   }
 
   std::string goal_error_to_string(const OdomPose &goal_pose) const {
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(2);
-    oss << "{phi: " << std::fabs(delta_phi(goal_pose)) << ", xy: " << std::hypot(delta_x(goal_pose), delta_y(goal_pose))
+    oss << "{phi: " << std::fabs(error_phi(goal_pose)) << ", xy: " << std::hypot(error_x(goal_pose), error_y(goal_pose))
         << "}";
     return oss.str();
   }
@@ -165,15 +173,62 @@ private:
     }
   }
 
-  std::array<float, 4> velocity_to_wheel_speeds(float dphi, float dx, float dy) {
-    const float s = odom_pose_.sin();
-    const float c = odom_pose_.cos();
+  void execute_trajectory() {
+    if (odom_pose_.goal_reached(goal_pose_)) {
+      if (waypoint_idx_ < relative_waypoints.size()) {
+        // Add relative waypoint to goal pose
+        goal_pose_ += OdomPose(relative_waypoints[waypoint_idx_]);
+      } else {
+        // Finished trajectory --> publish zero twist
+        std::fill(wheel_speed_msg_.data.begin(), wheel_speed_msg_.data.end(), 0.0f);
+        wheel_speed_publisher_->publish(wheel_speed_msg_);
 
-    float v[3];
-    v[0] = dphi;
-    v[1] = c * dx + s * dy;
-    v[2] = -s * dx + c * dy;
+        odom_timer_->cancel();
+        trajectory_timer_->cancel();
+        logging_timer_->cancel();
 
+        RCLCPP_INFO(this->get_logger(), "========================================");
+        RCLCPP_INFO(this->get_logger(), "Finished trajectory!");
+        RCLCPP_INFO(this->get_logger(), "========================================");
+
+        return;
+      }
+
+      waypoint_idx_++;
+
+      RCLCPP_INFO(this->get_logger(), "========================================");
+      RCLCPP_INFO(this->get_logger(), "Going to waypoint %zu --> %s", waypoint_idx_,
+                  goal_pose_.to_string().c_str());
+      RCLCPP_INFO(this->get_logger(), "Current pose: %s", odom_pose_.to_string().c_str());
+      RCLCPP_INFO(this->get_logger(), "========================================");
+    }
+
+    // Proportional constants and max values
+    const float kp_xy = 2.0;
+    const float kp_phi = 2.0;
+    const float max_linear = 2.0;
+    const float max_angular = 4.0;
+
+    // Get body frame errors
+    const float e_x = odom_pose_.error_x(goal_pose_);
+    const float e_y = odom_pose_.error_y(goal_pose_);
+    const float e_phi = odom_pose_.error_phi(goal_pose_);
+
+    // Apply proportional scaling
+    wz_ = std::clamp(kp_phi * e_phi, -max_angular, max_angular);
+    vx_ = kp_xy * e_x;
+    vy_ = kp_xy * e_y;
+
+    // Clamp linear velocity
+    const float v_norm = std::hypot(vx_, vy_);
+    if (v_norm > max_linear && v_norm > 1e-6f) {
+      const float scale = max_linear / v_norm;
+      vx_ *= scale;
+      vy_ *= scale;
+    }
+
+    // Convert body twist to wheel speeds
+    const float v[3] = {wz_, vx_, vy_};
     std::array<float, 4> u{};
     for (int i = 0; i < 4; i++) {
       for (int j = 0; j < 3; j++) {
@@ -181,57 +236,13 @@ private:
       }
     }
 
-    // RCLCPP_INFO(get_logger(), "v: [%.2f, %.2f, %.2f] --> u: [%.2f, %.2f, %.2f, %.2f]", v[0], v[1], v[2], u[0], u[1],
-    //             u[2], u[3]);
-
-    return u;
-  }
-
-  void execute_trajectory() {
-    if (waypoint_idx_ <= relative_waypoints.size()) {
-      if (odom_pose_.goal_reached(goal_pose_)) {
-        goal_pose_ += OdomPose(relative_waypoints[waypoint_idx_]);
-        waypoint_idx_++;
-
-        if (waypoint_idx_ <= relative_waypoints.size()) {
-          RCLCPP_INFO(this->get_logger(), "========================================");
-          RCLCPP_INFO(this->get_logger(), "Going to waypoint %zu --> %s", waypoint_idx_,
-                      goal_pose_.to_string().c_str());
-          RCLCPP_INFO(this->get_logger(), "Current pose: %s", odom_pose_.to_string().c_str());
-          RCLCPP_INFO(this->get_logger(), "========================================");
-        }
-      }
-
-      const float kp_xy = 2.0;
-      const float kp_phi = 2.0;
-      const float max_linear = 2.0;
-      const float max_angular = 4.0;
-
-      wz_ = std::min(kp_phi * odom_pose_.delta_phi(goal_pose_), max_angular);
-      vx_ = std::min(kp_xy * odom_pose_.delta_x(goal_pose_), max_linear);
-      vy_ = std::min(kp_xy * odom_pose_.delta_y(goal_pose_), max_linear);
-
-      auto u = velocity_to_wheel_speeds(wz_, vx_, vy_);
-
-      std::copy(u.begin(), u.end(), wheel_speed_msg_.data.begin());
-      wheel_speed_publisher_->publish(wheel_speed_msg_);
-    } else {
-      RCLCPP_INFO(this->get_logger(), "========================================");
-      RCLCPP_INFO(this->get_logger(), "Finished trajectory!");
-      RCLCPP_INFO(this->get_logger(), "========================================");
-
-      std::fill(wheel_speed_msg_.data.begin(), wheel_speed_msg_.data.end(), 0.0f);
-      wheel_speed_publisher_->publish(wheel_speed_msg_);
-
-      odom_timer_->cancel();
-      trajectory_timer_->cancel();
-      logging_timer_->cancel();
-    }
+    std::copy(u.begin(), u.end(), wheel_speed_msg_.data.begin());
+    wheel_speed_publisher_->publish(wheel_speed_msg_);
   }
 
   void print_logging() {
     RCLCPP_INFO(this->get_logger(), "Commanded twist: {wz: %.2f, vx: %.2f, vy: %.2f}", wz_, vx_, vy_);
-    RCLCPP_INFO(this->get_logger(), "Pose delta: %s", odom_pose_.delta_to_string(goal_pose_).c_str());
+    RCLCPP_INFO(this->get_logger(), "Pose delta: %s", odom_pose_.error_to_string(goal_pose_).c_str());
     RCLCPP_INFO(this->get_logger(), "Pose error: %s", odom_pose_.goal_error_to_string(goal_pose_).c_str());
   }
 };
