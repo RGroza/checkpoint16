@@ -5,6 +5,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp/utilities.hpp"
 #include "std_msgs/msg/float32_multi_array.hpp"
+#include "tf2/time.h"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
 #include <array>
@@ -61,31 +62,16 @@ public:
     return *this;
   }
 
-  void odom_callback(const Odometry::SharedPtr msg) {
-    x_ = msg->pose.pose.position.x;
-    y_ = msg->pose.pose.position.y;
-    auto q = msg->pose.pose.orientation;
-    phi_ = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
-  }
-
   float error_x(const OdomPose &goal) const {
-    const float ex = goal.x_ - x_;
-    const float ey = goal.y_ - y_;
-    const float c = std::cos(phi_);
-    const float s = std::sin(phi_);
-    return  c*ex + s*ey;
+    return goal.x_ - x_;
   }
 
   float error_y(const OdomPose &goal) const {
-    const float ex = goal.x_ - x_;
-    const float ey = goal.y_ - y_;
-    const float c = std::cos(phi_);
-    const float s = std::sin(phi_);
-    return -s*ex + c*ey;
+    return goal.y_ - y_;
   }
 
-  float error_phi(const OdomPose &goal_pose) const {
-    float d = goal_pose.phi_ - phi_;
+  float error_phi(const OdomPose &goal) const {
+    float d = goal.phi_ - phi_;
     if (d > M_PI)
       d -= 2 * M_PI;
     else if (d < -M_PI)
@@ -93,30 +79,23 @@ public:
     return d;
   }
 
-  bool goal_reached(const OdomPose &goal_pose) const {
-    return (std::fabs(error_phi(goal_pose)) < min_phi_error_ &&
-            std::hypot(error_x(goal_pose), error_y(goal_pose)) < min_xy_error_);
+  float sin() const {
+    return std::sin(phi_);
+  }
+
+  float cos() const {
+    return std::cos(phi_);
+  }
+
+  bool goal_reached(const OdomPose &goal) const {
+    return (std::fabs(error_phi(goal)) < min_phi_error_ &&
+            std::hypot(error_x(goal), error_y(goal)) < min_xy_error_);
   }
 
   std::string to_string() const {
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(2);
     oss << "(" << phi_ << ", " << x_ << ", " << y_ << ")";
-    return oss.str();
-  }
-
-  std::string error_to_string(const OdomPose &goal_pose) const {
-    std::ostringstream oss;
-    oss << std::fixed << std::setprecision(2);
-    oss << "{phi: " << error_phi(goal_pose) << ", x: " << error_x(goal_pose) << ", y: " << error_y(goal_pose) << "}";
-    return oss.str();
-  }
-
-  std::string goal_error_to_string(const OdomPose &goal_pose) const {
-    std::ostringstream oss;
-    oss << std::fixed << std::setprecision(2);
-    oss << "{phi: " << std::fabs(error_phi(goal_pose)) << ", xy: " << std::hypot(error_x(goal_pose), error_y(goal_pose))
-        << "}";
     return oss.str();
   }
 
@@ -129,12 +108,12 @@ private:
 class EightTrajectory : public rclcpp::Node {
 public:
   EightTrajectory() : Node("eight_trajectory") {
-    // odom_subscriber_ = this->create_subscription<Odometry>("rosbot_xl_base_controller/odom", 10,
-    //                                                        std::bind(&OdomPose::odom_callback, &odom_pose_, _1));
     odom_tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
     odom_tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*odom_tf_buffer_);
     wheel_speed_publisher_ = this->create_publisher<Float32MultiArray>("/wheel_speed", 10);
     cmd_vel_publisher_ = this->create_publisher<Twist>("/cmd_vel", 10);
+
+    rclcpp::sleep_for(500ms);
 
     odom_timer_ = this->create_wall_timer(20ms, std::bind(&EightTrajectory::odom_tf_lookup, this));
     trajectory_timer_ = this->create_wall_timer(20ms, std::bind(&EightTrajectory::execute_trajectory, this));
@@ -147,7 +126,6 @@ public:
   }
 
 private:
-  // rclcpp::Subscription<Odometry>::SharedPtr odom_subscriber_;
   std::shared_ptr<tf2_ros::Buffer> odom_tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> odom_tf_listener_;
   rclcpp::Publisher<Float32MultiArray>::SharedPtr wheel_speed_publisher_;
@@ -159,17 +137,16 @@ private:
   size_t waypoint_idx_;
   OdomPose odom_pose_;
   OdomPose goal_pose_;
-  float wz_, vx_, vy_;
+  float ephi_, ex_, ey_, wz_, vx_, vy_;
 
   void odom_tf_lookup() {
     try {
-      geometry_msgs::msg::TransformStamped tf = odom_tf_buffer_->lookupTransform("odom", "base_link", rclcpp::Time(0));
+      geometry_msgs::msg::TransformStamped tf = odom_tf_buffer_->lookupTransform("odom", "base_link", tf2::TimePointZero);
       auto q = tf.transform.rotation;
       odom_pose_.set(std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z)),
                      static_cast<float>(tf.transform.translation.x), static_cast<float>(tf.transform.translation.y));
     } catch (const tf2::TransformException &ex) {
-      RCLCPP_WARN(this->get_logger(), " ");
-      // RCLCPP_WARN(this->get_logger(), "TF lookup odom --> base_link failed: %s", ex.what());
+      RCLCPP_WARN(this->get_logger(), "TF lookup odom --> base_link failed: %s", ex.what());
     }
   }
 
@@ -200,6 +177,7 @@ private:
       RCLCPP_INFO(this->get_logger(), "Going to waypoint %zu --> %s", waypoint_idx_,
                   goal_pose_.to_string().c_str());
       RCLCPP_INFO(this->get_logger(), "Current pose: %s", odom_pose_.to_string().c_str());
+      RCLCPP_INFO(this->get_logger(), "Goal pose: %s", goal_pose_.to_string().c_str());
       RCLCPP_INFO(this->get_logger(), "========================================");
     }
 
@@ -207,25 +185,31 @@ private:
     const float kp_xy = 2.0;
     const float kp_phi = 2.0;
     const float max_linear = 2.0;
-    const float max_angular = 4.0;
+    const float max_angular = 2.0;
 
-    // Get body frame errors
-    const float e_x = odom_pose_.error_x(goal_pose_);
-    const float e_y = odom_pose_.error_y(goal_pose_);
-    const float e_phi = odom_pose_.error_phi(goal_pose_);
+    // Get world frame errors
+    const float ex_w = odom_pose_.error_x(goal_pose_);
+    const float ey_w = odom_pose_.error_y(goal_pose_);
+    ephi_ = odom_pose_.error_phi(goal_pose_);
 
-    // Apply proportional scaling
-    wz_ = std::clamp(kp_phi * e_phi, -max_angular, max_angular);
-    vx_ = kp_xy * e_x;
-    vy_ = kp_xy * e_y;
+    // Apply SE(2) rotation to get body frame errors
+    const float s = odom_pose_.sin();
+    const float c = odom_pose_.cos();
+    ex_ = c * ex_w + s * ey_w;
+    ey_ = -s * ex_w + c * ey_w;
 
-    // Clamp linear velocity
-    const float v_norm = std::hypot(vx_, vy_);
-    if (v_norm > max_linear && v_norm > 1e-6f) {
-      const float scale = max_linear / v_norm;
-      vx_ *= scale;
-      vy_ *= scale;
-    }
+    // Apply proportional scaling to get body twist
+    wz_ = std::clamp(kp_phi * ephi_, -max_angular, max_angular);
+    vx_ = std::clamp(kp_xy * ex_, -max_linear, max_linear);
+    vy_ = std::clamp(kp_xy * ey_, -max_linear, max_linear);
+
+    // Scale linear velocity
+    // const float v_norm = std::hypot(vx_, vy_);
+    // if (v_norm > max_linear && v_norm > 1e-6f) {
+    //   const float scale = max_linear / v_norm;
+    //   vx_ *= scale;
+    //   vy_ *= scale;
+    // }
 
     // Convert body twist to wheel speeds
     const float v[3] = {wz_, vx_, vy_};
@@ -241,9 +225,8 @@ private:
   }
 
   void print_logging() {
-    RCLCPP_INFO(this->get_logger(), "Commanded twist: {wz: %.2f, vx: %.2f, vy: %.2f}", wz_, vx_, vy_);
-    RCLCPP_INFO(this->get_logger(), "Pose delta: %s", odom_pose_.error_to_string(goal_pose_).c_str());
-    RCLCPP_INFO(this->get_logger(), "Pose error: %s", odom_pose_.goal_error_to_string(goal_pose_).c_str());
+    RCLCPP_INFO(this->get_logger(), "Body frame error: {phi: %.2f, x: %.2f, y: %.2f}", ephi_, ex_, ey_);
+    RCLCPP_INFO(this->get_logger(), "Commanded body twist: {wz: %.2f, vx: %.2f, vy: %.2f}", wz_, vx_, vy_);
   }
 };
 
