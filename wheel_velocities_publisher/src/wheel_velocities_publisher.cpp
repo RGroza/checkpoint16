@@ -33,6 +33,8 @@ private:
       wheel_speed_publisher_->publish(wheel_speed_message);
       rate.sleep();
     }
+
+    rclcpp::sleep_for(2000ms);
   }
 
   void publish_wheel_velocities() {

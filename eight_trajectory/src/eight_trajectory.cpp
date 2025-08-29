@@ -8,6 +8,8 @@
 #include "tf2/time.h"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
+#include <Eigen/Dense>
+#include <Eigen/Geometry>
 #include <array>
 #include <cmath>
 #include <iomanip>
@@ -19,91 +21,32 @@ using Odometry = nav_msgs::msg::Odometry;
 using Float32MultiArray = std_msgs::msg::Float32MultiArray;
 using Twist = geometry_msgs::msg::Twist;
 
-constexpr std::array<std::array<float, 3>, 8> relative_waypoints = {{{0.0, 1.0, -1.0},
-                                                                     {0.0, 1.0, 1.0},
-                                                                     {0.0, 1.0, 1.0},
-                                                                     {-1.5708, 1.0, -1.0},
-                                                                     {-1.5708, -1.0, -1.0},
-                                                                     {0.0, -1.0, 1.0},
-                                                                     {0.0, -1.0, 1.0},
-                                                                     {0.0, -1.0, -1.0}}};
+std::array<Eigen::Vector3f, 8> relative_waypoints = {{{0.0, 1.0, -1.0},
+                                                      {0.0, 1.0, 1.0},
+                                                      {0.0, 1.0, 1.0},
+                                                      {-1.5708, 1.0, -1.0},
+                                                      {-1.5708, -1.0, -1.0},
+                                                      {0.0, -1.0, 1.0},
+                                                      {0.0, -1.0, 1.0},
+                                                      {0.0, -1.0, -1.0}}};
 
 constexpr float l = 0.085;
 constexpr float w = 0.134845;
 constexpr float r = 0.05;
 
-constexpr float H[4][3] = {{(-l - w) / r, 1.0f / r, -1.0f / r},
-                           {(l + w) / r, 1.0f / r, 1.0f / r},
-                           {(l + w) / r, 1.0f / r, -1.0f / r},
-                           {(-l - w) / r, 1.0f / r, 1.0f / r}};
+Eigen::Matrix<float, 4, 3> H{{(-l - w) / r, 1.0f / r, -1.0f / r},
+                             {(l + w) / r, 1.0f / r, 1.0f / r},
+                             {(l + w) / r, 1.0f / r, -1.0f / r},
+                             {(-l - w) / r, 1.0f / r, 1.0f / r}};
 
-class OdomPose {
-public:
-  OdomPose() : phi_(0.0), x_(0.0), y_(0.0) {}
+constexpr float kp_xy = 2.0;
+constexpr float kp_phi = 2.0;
+constexpr float max_linear = 2.0;
+constexpr float max_angular = 2.0;
+constexpr float min_phi_error = 0.05;
+constexpr float min_xy_error = 0.01;
 
-  OdomPose(float phi, float x, float y) : phi_(phi), x_(x), y_(y) {}
-
-  OdomPose(std::array<float, 3> waypoint) : phi_(waypoint[0]), x_(waypoint[1]), y_(waypoint[2]) {}
-
-  void set(float phi, float x, float y) {
-    phi_ = phi;
-    x_ = x;
-    y_ = y;
-  }
-
-  OdomPose operator+(const OdomPose &p) const {
-    return OdomPose(phi_ + p.phi_, x_ + p.x_, y_ + p.y_);
-  }
-
-  OdomPose &operator+=(const OdomPose &p) {
-    phi_ += p.phi_;
-    x_ += p.x_;
-    y_ += p.y_;
-    return *this;
-  }
-
-  float error_x(const OdomPose &goal) const {
-    return goal.x_ - x_;
-  }
-
-  float error_y(const OdomPose &goal) const {
-    return goal.y_ - y_;
-  }
-
-  float error_phi(const OdomPose &goal) const {
-    float d = goal.phi_ - phi_;
-    if (d > M_PI)
-      d -= 2 * M_PI;
-    else if (d < -M_PI)
-      d += 2 * M_PI;
-    return d;
-  }
-
-  float sin() const {
-    return std::sin(phi_);
-  }
-
-  float cos() const {
-    return std::cos(phi_);
-  }
-
-  bool goal_reached(const OdomPose &goal) const {
-    return (std::fabs(error_phi(goal)) < min_phi_error_ &&
-            std::hypot(error_x(goal), error_y(goal)) < min_xy_error_);
-  }
-
-  std::string to_string() const {
-    std::ostringstream oss;
-    oss << std::fixed << std::setprecision(2);
-    oss << "(" << phi_ << ", " << x_ << ", " << y_ << ")";
-    return oss.str();
-  }
-
-private:
-  float phi_, x_, y_;
-  static constexpr float min_phi_error_ = 0.05f;
-  static constexpr float min_xy_error_ = 0.01f;
-};
+Eigen::Vector3f K_p{kp_phi, kp_xy, kp_xy};
 
 class EightTrajectory : public rclcpp::Node {
 public:
@@ -122,7 +65,6 @@ public:
     wheel_speed_msg_ = Float32MultiArray();
     wheel_speed_msg_.data.resize(4);
     waypoint_idx_ = 0;
-    goal_pose_ = OdomPose();
   }
 
 private:
@@ -134,27 +76,41 @@ private:
   rclcpp::TimerBase::SharedPtr trajectory_timer_;
   rclcpp::TimerBase::SharedPtr logging_timer_;
   Float32MultiArray wheel_speed_msg_;
+  Eigen::Vector3f goal_pose_s_{Eigen::Vector3f::Zero()};
+  Eigen::Vector3f odom_pose_s_, error_s_, error_b_, twist_s_, twist_b_;
   size_t waypoint_idx_;
-  OdomPose odom_pose_;
-  OdomPose goal_pose_;
-  float ephi_, ex_, ey_, wz_, vx_, vy_;
 
   void odom_tf_lookup() {
     try {
-      geometry_msgs::msg::TransformStamped tf = odom_tf_buffer_->lookupTransform("odom", "base_link", tf2::TimePointZero);
+      geometry_msgs::msg::TransformStamped tf =
+          odom_tf_buffer_->lookupTransform("odom", "base_link", tf2::TimePointZero);
       auto q = tf.transform.rotation;
-      odom_pose_.set(std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z)),
-                     static_cast<float>(tf.transform.translation.x), static_cast<float>(tf.transform.translation.y));
+      odom_pose_s_(0) = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+      odom_pose_s_(1) = tf.transform.translation.x;
+      odom_pose_s_(2) = tf.transform.translation.y;
     } catch (const tf2::TransformException &ex) {
       RCLCPP_WARN(this->get_logger(), "TF lookup odom --> base_link failed: %s", ex.what());
     }
   }
 
+  bool goal_reached() {
+    return (std::fabs(error_s_(0)) < min_phi_error && std::hypot(error_s_(1), error_s_(2)) < min_xy_error);
+  }
+
+  void wrap_angle(Eigen::Vector3f vec) {
+    // Constraint angle phi to [-pi, +pi]
+    if (vec(0) > M_PI)
+      vec(0) -= 2 * M_PI;
+    else if (vec(0) < -M_PI)
+      vec(0) += 2 * M_PI;
+  }
+
   void execute_trajectory() {
-    if (odom_pose_.goal_reached(goal_pose_)) {
+    if (goal_reached()) {
       if (waypoint_idx_ < relative_waypoints.size()) {
-        // Add relative waypoint to goal pose
-        goal_pose_ += OdomPose(relative_waypoints[waypoint_idx_]);
+        // Add relative waypoint to goal pose in the static frame
+        goal_pose_s_ += relative_waypoints[waypoint_idx_];
+        wrap_angle(goal_pose_s_);
       } else {
         // Finished trajectory --> publish zero twist
         std::fill(wheel_speed_msg_.data.begin(), wheel_speed_msg_.data.end(), 0.0f);
@@ -164,69 +120,49 @@ private:
         trajectory_timer_->cancel();
         logging_timer_->cancel();
 
-        RCLCPP_INFO(this->get_logger(), "========================================");
+        RCLCPP_INFO(this->get_logger(), "========================================================");
         RCLCPP_INFO(this->get_logger(), "Finished trajectory!");
-        RCLCPP_INFO(this->get_logger(), "========================================");
 
         return;
       }
 
       waypoint_idx_++;
 
-      RCLCPP_INFO(this->get_logger(), "========================================");
-      RCLCPP_INFO(this->get_logger(), "Going to waypoint %zu --> %s", waypoint_idx_,
-                  goal_pose_.to_string().c_str());
-      RCLCPP_INFO(this->get_logger(), "Current pose: %s", odom_pose_.to_string().c_str());
-      RCLCPP_INFO(this->get_logger(), "Goal pose: %s", goal_pose_.to_string().c_str());
-      RCLCPP_INFO(this->get_logger(), "========================================");
+      RCLCPP_INFO(this->get_logger(), "========================================================");
+      RCLCPP_INFO(this->get_logger(), "Going to waypoint %zu", waypoint_idx_);
+      RCLCPP_INFO_STREAM(this->get_logger(),
+                         "Odom pose (s):  " << std::fixed << std::setprecision(2) << odom_pose_s_.transpose());
+      RCLCPP_INFO_STREAM(this->get_logger(),
+                         "Goal pose (s):  " << std::fixed << std::setprecision(2) << goal_pose_s_.transpose());
     }
 
-    // Proportional constants and max values
-    const float kp_xy = 2.0;
-    const float kp_phi = 2.0;
-    const float max_linear = 2.0;
-    const float max_angular = 2.0;
+    // Get static frame error
+    error_s_ = goal_pose_s_ - odom_pose_s_;
+    wrap_angle(error_s_);
 
-    // Get world frame errors
-    const float ex_w = odom_pose_.error_x(goal_pose_);
-    const float ey_w = odom_pose_.error_y(goal_pose_);
-    ephi_ = odom_pose_.error_phi(goal_pose_);
-
-    // Apply SE(2) rotation to get body frame errors
-    const float s = odom_pose_.sin();
-    const float c = odom_pose_.cos();
-    ex_ = c * ex_w + s * ey_w;
-    ey_ = -s * ex_w + c * ey_w;
+    // Apply SE(3) rotation to get body frame errors
+    Eigen::Matrix3f R_bs = Eigen::AngleAxisf(-odom_pose_s_(0), Eigen::Vector3f::UnitX()).toRotationMatrix();
+    error_b_ = R_bs * error_s_;
 
     // Apply proportional scaling to get body twist
-    wz_ = std::clamp(kp_phi * ephi_, -max_angular, max_angular);
-    vx_ = std::clamp(kp_xy * ex_, -max_linear, max_linear);
-    vy_ = std::clamp(kp_xy * ey_, -max_linear, max_linear);
-
-    // Scale linear velocity
-    // const float v_norm = std::hypot(vx_, vy_);
-    // if (v_norm > max_linear && v_norm > 1e-6f) {
-    //   const float scale = max_linear / v_norm;
-    //   vx_ *= scale;
-    //   vy_ *= scale;
-    // }
+    twist_b_ = K_p.cwiseProduct(error_b_);
 
     // Convert body twist to wheel speeds
-    const float v[3] = {wz_, vx_, vy_};
-    std::array<float, 4> u{};
-    for (int i = 0; i < 4; i++) {
-      for (int j = 0; j < 3; j++) {
-        u[i] += H[i][j] * v[j];
-      }
-    }
+    Eigen::Vector4f u = H * twist_b_;
 
-    std::copy(u.begin(), u.end(), wheel_speed_msg_.data.begin());
+    // std::copy(u.data(), u.data() + u.size(), wheel_speed_msg_.data.begin());
+    Eigen::Map<Eigen::Vector4f>(wheel_speed_msg_.data.data()) = u;
     wheel_speed_publisher_->publish(wheel_speed_msg_);
   }
 
   void print_logging() {
-    RCLCPP_INFO(this->get_logger(), "Body frame error: {phi: %.2f, x: %.2f, y: %.2f}", ephi_, ex_, ey_);
-    RCLCPP_INFO(this->get_logger(), "Commanded body twist: {wz: %.2f, vx: %.2f, vy: %.2f}", wz_, vx_, vy_);
+    RCLCPP_INFO(this->get_logger(), "--------------------------------------------------------");
+    RCLCPP_INFO_STREAM(this->get_logger(), "Error (s):  " << std::fixed << std::setprecision(2) << error_s_.transpose()
+                                                          << "\t(b):  " << std::fixed << std::setprecision(2)
+                                                          << error_b_.transpose());
+    RCLCPP_INFO_STREAM(this->get_logger(), "Twist (s):  " << std::fixed << std::setprecision(2) << twist_s_.transpose()
+                                                          << "\t(b):  " << std::fixed << std::setprecision(2)
+                                                          << twist_b_.transpose());
   }
 };
 
